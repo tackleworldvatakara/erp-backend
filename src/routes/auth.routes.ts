@@ -24,7 +24,13 @@ const authLimiter = rateLimit({
   skip: () => !config.isProduction, // disable in development
 });
 
-router.post('/setup', authLimiter, validate(setupSchema), setupController);
+router.post('/setup', authLimiter, validate(setupSchema), (req, res, next) => {
+  if (config.isProduction) {
+    res.status(403).json({ success: false, message: 'Setup is disabled' });
+    return;
+  }
+  setupController(req, res, next);
+});
 router.post('/login', authLimiter, validate(loginSchema), loginController);
 router.post('/refresh', refreshController);
 router.post('/logout', logoutController);
