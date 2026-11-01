@@ -31,11 +31,27 @@ export async function createSale(data: CreateSaleInput, userId: string) {
     if (!product) {
       throw Object.assign(new Error(`Product not found: ${item.productId}`), { statusCode: 404 });
     }
-    if (product.currentStock < item.quantity) {
-      throw Object.assign(
-        new Error(`Insufficient stock for "${product.name}". Available: ${product.currentStock}, Requested: ${item.quantity}`),
-        { statusCode: 400 }
-      );
+    // If product has variants and a variantColor is specified, validate variant stock
+    if (product.variants && product.variants.length > 0 && item.variantColor) {
+      const variant = product.variants.find((v) => v.color === item.variantColor);
+      if (!variant) {
+        throw Object.assign(new Error(`Color variant "${item.variantColor}" not found for "${product.name}"`), { statusCode: 400 });
+      }
+      if (variant.quantity < item.quantity) {
+        throw Object.assign(
+          new Error(`Insufficient stock for "${product.name}" (${item.variantColor}). Available: ${variant.quantity}, Requested: ${item.quantity}`),
+          { statusCode: 400 }
+        );
+      }
+    } else if (product.variants && product.variants.length > 0 && !item.variantColor) {
+      throw Object.assign(new Error(`Please select a color variant for "${product.name}"`), { statusCode: 400 });
+    } else {
+      if (product.currentStock < item.quantity) {
+        throw Object.assign(
+          new Error(`Insufficient stock for "${product.name}". Available: ${product.currentStock}, Requested: ${item.quantity}`),
+          { statusCode: 400 }
+        );
+      }
     }
   }
 
@@ -54,6 +70,7 @@ export async function createSale(data: CreateSaleInput, userId: string) {
       product: product._id,
       productName: product.name,
       sku: product.sku,
+      variantColor: item.variantColor,
       quantity: item.quantity,
       unit: product.unit,
       unitPrice: item.unitPrice,
@@ -104,7 +121,19 @@ export async function createSale(data: CreateSaleInput, userId: string) {
     const prevStock = product.currentStock;
     const newStock = prevStock - item.quantity;
 
-    await Product.findByIdAndUpdate(item.productId, { $inc: { currentStock: -item.quantity } });
+    if (product.variants && product.variants.length > 0 && item.variantColor) {
+      // Deduct from the specific variant quantity and update total stock
+      await Product.findByIdAndUpdate(item.productId, {
+        $inc: {
+          currentStock: -item.quantity,
+          'variants.$[v].quantity': -item.quantity,
+        },
+      }, {
+        arrayFilters: [{ 'v.color': item.variantColor }],
+      });
+    } else {
+      await Product.findByIdAndUpdate(item.productId, { $inc: { currentStock: -item.quantity } });
+    }
 
     await StockMovement.create({
       product: product._id,
@@ -114,7 +143,7 @@ export async function createSale(data: CreateSaleInput, userId: string) {
       newStock,
       referenceType: 'Sale',
       referenceId: sale._id,
-      reason: `Sale: ${invoiceNumber}`,
+      reason: `Sale: ${invoiceNumber}${item.variantColor ? ` (${item.variantColor})` : ''}`,
       createdBy: new mongoose.Types.ObjectId(userId),
     });
   });
@@ -207,24 +236,50 @@ export async function cancelSale(id: string, userId: string, reason: string) {
       }
 
       for (const item of sale.items) {
-        const product = await Product.findByIdAndUpdate(
-          item.product,
-          { $inc: { currentStock: item.quantity } },
-          { new: true, session },
-        );
-        if (!product) continue;
-        const previousStock = product.currentStock - item.quantity;
-        await StockMovement.create([{
-          product: product._id,
-          movementType: 'stock_adjustment',
-          quantity: item.quantity,
-          previousStock,
-          newStock: product.currentStock,
-          referenceType: 'SaleCancellation',
-          referenceId: sale._id,
-          reason: `Cancelled sale: ${sale.invoiceNumber}`,
-          createdBy: new mongoose.Types.ObjectId(userId),
-        }], { session });
+        if (item.variantColor) {
+          const product = await Product.findByIdAndUpdate(
+            item.product,
+            {
+              $inc: {
+                currentStock: item.quantity,
+                'variants.$[v].quantity': item.quantity,
+              },
+            },
+            { new: true, session, arrayFilters: [{ 'v.color': item.variantColor }] },
+          );
+          if (!product) continue;
+          const previousStock = product.currentStock - item.quantity;
+          await StockMovement.create([{
+            product: product._id,
+            movementType: 'stock_adjustment',
+            quantity: item.quantity,
+            previousStock,
+            newStock: product.currentStock,
+            referenceType: 'SaleCancellation',
+            referenceId: sale._id,
+            reason: `Cancelled sale: ${sale.invoiceNumber}${item.variantColor ? ` (${item.variantColor})` : ''}`,
+            createdBy: new mongoose.Types.ObjectId(userId),
+          }], { session });
+        } else {
+          const product = await Product.findByIdAndUpdate(
+            item.product,
+            { $inc: { currentStock: item.quantity } },
+            { new: true, session },
+          );
+          if (!product) continue;
+          const previousStock = product.currentStock - item.quantity;
+          await StockMovement.create([{
+            product: product._id,
+            movementType: 'stock_adjustment',
+            quantity: item.quantity,
+            previousStock,
+            newStock: product.currentStock,
+            referenceType: 'SaleCancellation',
+            referenceId: sale._id,
+            reason: `Cancelled sale: ${sale.invoiceNumber}`,
+            createdBy: new mongoose.Types.ObjectId(userId),
+          }], { session });
+        }
       }
       cancelledSale = updatedSale;
     });

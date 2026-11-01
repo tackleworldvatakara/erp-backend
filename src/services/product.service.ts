@@ -12,23 +12,31 @@ export async function createProduct(data: CreateProductInput, userId: string) {
     throw err;
   }
 
+  // If variants provided, currentStock = sum of variant quantities
+  const variants = data.variants ?? [];
+  const stockFromVariants = variants.length > 0
+    ? variants.reduce((sum, v) => sum + v.quantity, 0)
+    : data.currentStock;
+
   const product = await Product.create({
     ...data,
     sku: data.sku.toUpperCase(),
     category: data.category?.trim() || undefined,
     brand: data.brand?.trim() || undefined,
     description: data.description?.trim() || undefined,
+    variants,
+    currentStock: stockFromVariants,
     createdBy: new mongoose.Types.ObjectId(userId),
   });
 
   // Create opening stock movement if stock > 0
-  if (data.currentStock > 0) {
+  if (stockFromVariants > 0) {
     await StockMovement.create({
       product: product._id,
       movementType: 'opening_stock',
-      quantity: data.currentStock,
+      quantity: stockFromVariants,
       previousStock: 0,
-      newStock: data.currentStock,
+      newStock: stockFromVariants,
       reason: 'Opening stock',
       createdBy: new mongoose.Types.ObjectId(userId),
     });
@@ -171,26 +179,32 @@ export async function updateProduct(id: string, data: UpdateProductInput, userId
 
   // Track stock change for movement record
   const prevStock = product.currentStock;
-  const newStock = data.currentStock !== undefined ? data.currentStock : prevStock;
+
+  // If variants are being updated, recalculate total stock from variant quantities
+  const updatedVariants = data.variants !== undefined ? data.variants : product.variants;
+  const newStockFromVariants = updatedVariants.length > 0
+    ? updatedVariants.reduce((sum, v) => sum + v.quantity, 0)
+    : (data.currentStock !== undefined ? data.currentStock : prevStock);
 
   Object.assign(product, {
     ...data,
     category: data.category?.trim() || undefined,
     brand: data.brand?.trim() || undefined,
     description: data.description?.trim() || undefined,
+    currentStock: newStockFromVariants,
   });
   if (data.sku) product.sku = data.sku.toUpperCase();
   await product.save();
 
   // Create stock adjustment movement if stock changed
-  if (data.currentStock !== undefined && data.currentStock !== prevStock) {
-    const diff = data.currentStock - prevStock;
+  if (newStockFromVariants !== prevStock) {
+    const diff = newStockFromVariants - prevStock;
     await StockMovement.create({
       product: product._id,
       movementType: 'stock_adjustment',
       quantity: diff,
       previousStock: prevStock,
-      newStock: newStock,
+      newStock: newStockFromVariants,
       reason: 'Manual stock adjustment',
       createdBy: new mongoose.Types.ObjectId(userId),
     });
@@ -231,7 +245,7 @@ export async function searchProducts(query: string) {
       { brand: { $regex: query, $options: 'i' } },
     ],
   })
-    .select('_id name sku sellingPrice currentStock unit brand')
+    .select('_id name sku sellingPrice currentStock unit brand variants')
     .limit(20)
     .lean();
 

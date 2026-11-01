@@ -3,6 +3,11 @@ import mongoose, { Document, Schema } from 'mongoose';
 export type ProductUnit = 'piece' | 'pair' | 'box' | 'kg' | 'meter' | 'liter' | 'set' | 'roll';
 export type ProductStatus = 'active' | 'inactive' | 'archived';
 
+export interface IProductVariant {
+  color: string;
+  quantity: number;
+}
+
 export interface IProduct {
   name: string;
   sku: string;
@@ -21,6 +26,7 @@ export interface IProduct {
   hsnCode?: string;
   currentStock: number;
   minStockThreshold: number;
+  variants: IProductVariant[];
   location?: string;
   supplier?: mongoose.Types.ObjectId;
   images: string[];
@@ -32,6 +38,14 @@ export interface IProduct {
 }
 
 export interface IProductDocument extends IProduct, Document {}
+
+const productVariantSchema = new Schema<IProductVariant>(
+  {
+    color: { type: String, required: true, trim: true },
+    quantity: { type: Number, required: true, default: 0, min: 0 },
+  },
+  { _id: false }
+);
 
 const productSchema = new Schema<IProductDocument>(
   {
@@ -56,6 +70,7 @@ const productSchema = new Schema<IProductDocument>(
     hsnCode: String,
     currentStock: { type: Number, default: 0 },
     minStockThreshold: { type: Number, default: 10 },
+    variants: { type: [productVariantSchema], default: [] },
     location: String,
     supplier: { type: Schema.Types.ObjectId, ref: 'Supplier' },
     images: [{ type: String }],
