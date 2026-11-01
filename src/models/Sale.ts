@@ -9,7 +9,6 @@ export interface ISaleItem {
   product: mongoose.Types.ObjectId;
   productName: string;
   sku: string;
-  variantColor?: string;
   quantity: number;
   unit: string;
   unitPrice: number;
@@ -67,7 +66,6 @@ const saleItemSchema = new Schema<ISaleItem>(
     product: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
     productName: { type: String, required: true },
     sku: { type: String, required: true },
-    variantColor: { type: String },
     quantity: { type: Number, required: true },
     unit: { type: String, required: true },
     unitPrice: { type: Number, required: true },

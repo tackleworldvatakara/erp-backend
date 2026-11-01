@@ -2,11 +2,6 @@ import { z } from 'zod';
 
 const units = ['piece', 'pair', 'box', 'kg', 'meter', 'liter', 'set', 'roll'] as const;
 
-const productVariantSchema = z.object({
-  color: z.string().min(1, 'Color name is required'),
-  quantity: z.number().min(0, 'Quantity cannot be negative'),
-});
-
 export const createProductSchema = z.object({
   name: z.string().min(1, 'Product name is required').max(200),
   sku: z.string().min(1, 'SKU is required').max(50).toUpperCase(),
@@ -17,7 +12,7 @@ export const createProductSchema = z.object({
   sellingPrice: z.number().min(0, 'Selling price cannot be negative'),
   currentStock: z.number().min(0).default(0),
   minStockThreshold: z.number().min(0).default(10),
-  variants: z.array(productVariantSchema).optional().default([]),
+  color: z.string().optional(),
   description: z.string().optional(),
 });
 
