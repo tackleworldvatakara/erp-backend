@@ -20,3 +20,25 @@ export const createSaleSchema = z.object({
 });
 
 export type CreateSaleInput = z.infer<typeof createSaleSchema>;
+
+export const updateSaleSchema = z.object({
+  customerName: z.string().min(1).optional(),
+  customerPhone: z.string().optional(),
+  items: z
+    .array(
+      z.object({
+        productId: z.string().min(1, 'Product ID required'),
+        quantity: z.number().int().min(1, 'Quantity must be at least 1'),
+        unitPrice: z.number().min(0, 'Unit price cannot be negative'),
+        discount: z.number().min(0).max(100).default(0),
+      })
+    )
+    .min(1, 'At least one item is required')
+    .optional(),
+  commonDiscount: z.number().min(0).optional(),
+  paymentMethod: z.enum(['cash', 'upi', 'card', 'bank_transfer']).optional(),
+  amountPaid: z.number().min(0).optional(),
+  notes: z.string().optional(),
+});
+
+export type UpdateSaleInput = z.infer<typeof updateSaleSchema>;

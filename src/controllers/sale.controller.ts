@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { sendSuccess, sendError } from '../utils/response';
-import { createSaleSchema } from '../validation/sale.validation';
+import { createSaleSchema, updateSaleSchema } from '../validation/sale.validation';
 import * as SaleService from '../services/sale.service';
 
 export const createSale = asyncHandler(async (req: Request, res: Response) => {
@@ -39,6 +39,16 @@ export const cancelSale = asyncHandler(async (req: Request, res: Response) => {
   }
   const sale = await SaleService.cancelSale(req.params.id, req.user!.userId, reason.trim());
   sendSuccess(res, sale, 'Bill cancelled and stock restored');
+});
+
+export const updateSale = asyncHandler(async (req: Request, res: Response) => {
+  const parsed = updateSaleSchema.safeParse(req.body);
+  if (!parsed.success) {
+    sendError(res, 'Validation failed', 400, parsed.error.errors);
+    return;
+  }
+  const sale = await SaleService.updateSale(req.params.id, parsed.data, req.user!.userId);
+  sendSuccess(res, sale, 'Bill updated successfully');
 });
 
 export const getDashboardStats = asyncHandler(async (_req: Request, res: Response) => {
