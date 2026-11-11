@@ -4,7 +4,7 @@ import { Product } from '../models/Product';
 import { StockMovement } from '../models/StockMovement';
 import { BusinessSettings } from '../models/BusinessSettings';
 import { CustomerReturn } from '../models/CustomerReturn';
-import { CreateSaleInput } from '../validation/sale.validation';
+import { CreateSaleInput, UpdateSaleInput } from '../validation/sale.validation';
 
 async function generateInvoiceNumber(): Promise<string> {
   // Atomically increment the counter in BusinessSettings
@@ -229,6 +229,163 @@ export async function cancelSale(id: string, userId: string, reason: string) {
       cancelledSale = updatedSale;
     });
     return cancelledSale;
+  } finally {
+    await session.endSession();
+  }
+}
+
+export async function updateSale(id: string, data: UpdateSaleInput, userId: string) {
+  const session = await mongoose.startSession();
+  let updatedSale: Awaited<ReturnType<typeof Sale.findById>> = null;
+
+  try {
+    await session.withTransaction(async () => {
+      const sale = await Sale.findById(id).session(session);
+      if (!sale) {
+        throw Object.assign(new Error('Sale not found'), { statusCode: 404 });
+      }
+      if (sale.status !== 'confirmed') {
+        throw Object.assign(new Error('Only confirmed bills can be edited'), { statusCode: 400 });
+      }
+
+      // ── 1. Handle items update if provided ─────────────────────────────
+      let newItems = sale.items as typeof sale.items;
+      let subtotal = sale.subtotal;
+      let discountTotal = sale.discountTotal;
+      let grandTotal = sale.grandTotal;
+
+      if (data.items) {
+        const productIds = data.items.map((i) => new mongoose.Types.ObjectId(i.productId));
+        const products = await Product.find({ _id: { $in: productIds }, isDeleted: false }).session(session);
+        const productMap = new Map(products.map((p) => [p._id.toString(), p]));
+
+        // Build a map of old quantities by product id
+        const oldQtyByProduct: Record<string, number> = {};
+        for (const item of sale.items) {
+          const pid = item.product.toString();
+          oldQtyByProduct[pid] = (oldQtyByProduct[pid] ?? 0) + item.quantity;
+        }
+
+        // Build a map of new quantities by product id
+        const newQtyByProduct: Record<string, number> = {};
+        for (const item of data.items) {
+          newQtyByProduct[item.productId] = (newQtyByProduct[item.productId] ?? 0) + item.quantity;
+        }
+
+        // Validate stock: for each product, check available = currentStock + oldQty >= newQty
+        for (const item of data.items) {
+          const product = productMap.get(item.productId);
+          if (!product) {
+            throw Object.assign(new Error(`Product not found: ${item.productId}`), { statusCode: 404 });
+          }
+          const alreadySold = oldQtyByProduct[item.productId] ?? 0;
+          const available = product.currentStock + alreadySold;
+          const needed = newQtyByProduct[item.productId] ?? 0;
+          if (available < needed) {
+            throw Object.assign(
+              new Error(`Insufficient stock for "${product.name}". Available: ${product.currentStock}, Needed extra: ${needed - alreadySold}`),
+              { statusCode: 400 }
+            );
+          }
+        }
+
+        // Recalculate item totals
+        let newSubtotal = 0;
+        let newDiscountTotal = 0;
+        const newSaleItems = data.items.map((item) => {
+          const product = productMap.get(item.productId)!;
+          const lineSubtotal = item.quantity * item.unitPrice;
+          const discountAmount = parseFloat(((lineSubtotal * item.discount) / 100).toFixed(2));
+          const lineTotal = parseFloat((lineSubtotal - discountAmount).toFixed(2));
+          newSubtotal += lineSubtotal;
+          newDiscountTotal += discountAmount;
+          // Preserve costAtSale from old items if same product, else use current
+          const oldItem = sale.items.find((oi) => oi.product.toString() === item.productId);
+          return {
+            product: product._id,
+            productName: product.name,
+            sku: product.sku,
+            quantity: item.quantity,
+            unit: product.unit,
+            unitPrice: item.unitPrice,
+            discount: item.discount,
+            discountAmount,
+            taxRate: 0,
+            taxAmount: 0,
+            lineTotal,
+            costAtSale: oldItem?.costAtSale ?? product.purchaseCost,
+          };
+        });
+
+        newSubtotal = parseFloat(newSubtotal.toFixed(2));
+        newDiscountTotal = parseFloat((newDiscountTotal + (data.commonDiscount ?? 0)).toFixed(2));
+        const newGrandTotal = parseFloat((newSubtotal - newDiscountTotal).toFixed(2));
+
+        // Adjust stock: restore old, deduct new
+        const allProductIds = new Set([
+          ...Object.keys(oldQtyByProduct),
+          ...Object.keys(newQtyByProduct),
+        ]);
+
+        for (const pid of allProductIds) {
+          const oldQty = oldQtyByProduct[pid] ?? 0;
+          const newQty = newQtyByProduct[pid] ?? 0;
+          const diff = newQty - oldQty; // positive = we need more stock, negative = returning stock
+          if (diff === 0) continue;
+
+          const product = await Product.findByIdAndUpdate(
+            pid,
+            { $inc: { currentStock: -diff } },
+            { new: true, session }
+          );
+          if (!product) continue;
+          const previousStock = product.currentStock + diff;
+
+          await StockMovement.create([{
+            product: product._id,
+            movementType: diff > 0 ? 'sale' : 'stock_adjustment',
+            quantity: -diff,
+            previousStock,
+            newStock: product.currentStock,
+            referenceType: 'SaleEdit',
+            referenceId: sale._id,
+            reason: `Edited sale: ${sale.invoiceNumber}`,
+            createdBy: new mongoose.Types.ObjectId(userId),
+          }], { session });
+        }
+
+        newItems = newSaleItems as typeof sale.items;
+        subtotal = newSubtotal;
+        discountTotal = newDiscountTotal;
+        grandTotal = newGrandTotal;
+      }
+
+      // ── 2. Recalculate payment fields ──────────────────────────────────
+      const rawAmountPaid = data.amountPaid !== undefined ? data.amountPaid : sale.paidAmount;
+      const paidAmount = parseFloat(Math.min(rawAmountPaid, grandTotal).toFixed(2));
+      const balanceDue = parseFloat((grandTotal - paidAmount).toFixed(2));
+      const paymentStatus: 'paid' | 'partial' | 'unpaid' =
+        balanceDue <= 0 ? 'paid' : paidAmount > 0 ? 'partial' : 'unpaid';
+
+      // ── 3. Apply update ────────────────────────────────────────────────
+      const updateFields: Record<string, unknown> = {
+        ...(data.items ? { items: newItems, subtotal, discountTotal, taxableAmount: grandTotal, grandTotal } : {}),
+        paidAmount,
+        balanceDue,
+        paymentStatus,
+        ...(data.paymentMethod ? { paymentMethod: data.paymentMethod } : {}),
+        ...(data.customerName !== undefined ? { customerName: data.customerName || 'Walk-in Customer' } : {}),
+        ...(data.notes !== undefined ? { notes: data.notes } : {}),
+      };
+
+      updatedSale = await Sale.findByIdAndUpdate(
+        sale._id,
+        { $set: updateFields },
+        { new: true, session }
+      );
+    });
+
+    return updatedSale;
   } finally {
     await session.endSession();
   }
